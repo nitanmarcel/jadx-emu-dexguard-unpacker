@@ -16,16 +16,15 @@ class DexGuardExtension : EmuExtension {
     )
 
     override fun init(ctx: EmuExtensionContext) {
-        val stubs = ctx.emu.engine.android
-        val hooks = ctx.emu.world.hooks
+        val hooks = ctx.hooks
         val app = AppInfo(ctx.jadx.decompiler)
-        OpaqueConstants.register(stubs)
-        HostShims(app).register(stubs, hooks)
-        AppContextStubs(app).register(stubs, hooks)
-        val unpacker = Unpacker(ctx, hooks)
-        val streamVm by lazy { ctx.emu.engine.newVm(unpacker.limits, hooks = hooks) }
+        OpaqueConstants.register(hooks)
+        HostShims(app).register(hooks)
+        AppContextStubs(app).register(hooks)
+        val unpacker = Unpacker(ctx)
+        val streamVm by lazy { ctx.emu.newVm(unpacker.limits) }
         DexStreams(ctx.emu.source) { streamVm }.register(hooks)
-        HiddenDex(ctx.emu.source, ctx.emu.engine, hooks, unpacker.limits, ctx.log, unpacker::onLoad).register()
+        HiddenDex(ctx.emu, hooks, unpacker.limits, ctx.log, unpacker::onLoad).register()
         unpacker.registerActions()
     }
 }

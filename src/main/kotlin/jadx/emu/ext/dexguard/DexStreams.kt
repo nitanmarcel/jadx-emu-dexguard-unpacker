@@ -2,10 +2,9 @@ package jadx.emu.ext.dexguard
 
 import jadx.plugins.emu.exec.DvmCtorHandle
 import jadx.plugins.emu.exec.DvmMethodHandle
-import jadx.plugins.emu.exec.HookRegistry
+import jadx.plugins.emu.api.Hooks
 import jadx.plugins.emu.exec.MethodSource
 import jadx.plugins.emu.exec.Vm
-import jadx.plugins.emu.exec.hostClass
 import jadx.plugins.emu.exec.model.DexMethod
 import jadx.plugins.emu.exec.runtime.DvmObject
 import jadx.plugins.emu.exec.runtime.UnknownVal
@@ -13,32 +12,32 @@ import java.io.InputStream
 
 internal class DexStreams(private val source: MethodSource, private val vm: () -> Vm) {
 
-    fun register(hooks: HookRegistry) {
-        hooks.add("Ljava/io/FilterInputStream;-><init>(Ljava/io/InputStream;)V") { call ->
-            val obj = call.receiver as? DvmObject ?: return@add
-            obj.fields[IN_FIELD] = call.args.getOrNull(0)
-            obj.fields["${obj.type}.in"] = call.args.getOrNull(0)
-            call.replace(null)
+    fun register(hooks: Hooks) {
+        hooks.hook("Ljava/io/FilterInputStream;-><init>(Ljava/io/InputStream;)V") {
+            val obj = receiver as? DvmObject ?: return@hook
+            obj.fields[IN_FIELD] = args.getOrNull(0)
+            obj.fields["${obj.type}.in"] = args.getOrNull(0)
+            replace(null)
         }
-        hooks.add(HostShims.METHOD_INVOKE) { call ->
-            val h = call.receiver as? DvmMethodHandle ?: return@add
-            val m = h.hostMethod ?: return@add
-            val target = call.args.getOrNull(0) as? DvmObject ?: return@add
-            if (!extendsHost(target.type, m.declaringClass)) return@add
-            val args = (call.args.getOrNull(1) as? Array<*>)?.toList() ?: emptyList()
+        hooks.hook(HostShims.METHOD_INVOKE) {
+            val h = receiver as? DvmMethodHandle ?: return@hook
+            val m = h.hostMethod ?: return@hook
+            val target = args.getOrNull(0) as? DvmObject ?: return@hook
+            if (!extendsHost(target.type, m.declaringClass)) return@hook
+            val callArgs = (args.getOrNull(1) as? Array<*>)?.toList() ?: emptyList()
             val shortId = m.name + "(" + m.parameterTypes.joinToString("") { desc(it) } + ")" + desc(m.returnType)
-            val impl = resolve(target.type, shortId) ?: return@add
-            call.replace(vm().invoke(impl, args, target))
+            val impl = resolve(target.type, shortId) ?: return@hook
+            replace(vm().invoke(impl, callArgs, target))
         }
-        hooks.add("Ljava/lang/reflect/Constructor;->newInstance([Ljava/lang/Object;)Ljava/lang/Object;") { call ->
-            val h = call.receiver as? DvmCtorHandle ?: return@add
-            val args = (call.args.getOrNull(0) as? Array<*>)?.toList() ?: return@add
-            if (args.none { it is DvmObject && isDexStream(it) }) return@add
-            val cls = runCatching { hostClass(h.owner) }.getOrNull() ?: return@add
-            val params = h.params.map { runCatching { hostClass(it) }.getOrNull() ?: return@add }.toTypedArray()
-            val ctor = runCatching { cls.getConstructor(*params) }.getOrNull() ?: return@add
-            val adapted = args.map { if (it is DvmObject && isDexStream(it)) DexInputStream(it) else it }
-            runCatching { ctor.newInstance(*adapted.toTypedArray()) }.onSuccess { call.replace(it) }
+        hooks.hook("Ljava/lang/reflect/Constructor;->newInstance([Ljava/lang/Object;)Ljava/lang/Object;") {
+            val h = receiver as? DvmCtorHandle ?: return@hook
+            val ctorArgs = (args.getOrNull(0) as? Array<*>)?.toList() ?: return@hook
+            if (ctorArgs.none { it is DvmObject && isDexStream(it) }) return@hook
+            val cls = runCatching { HostClasses.of(h.owner) }.getOrNull() ?: return@hook
+            val params = h.params.map { runCatching { HostClasses.of(it) }.getOrNull() ?: return@hook }.toTypedArray()
+            val ctor = runCatching { cls.getConstructor(*params) }.getOrNull() ?: return@hook
+            val adapted = ctorArgs.map { if (it is DvmObject && isDexStream(it)) DexInputStream(it) else it }
+            runCatching { ctor.newInstance(*adapted.toTypedArray()) }.onSuccess { replace(it) }
         }
     }
 
@@ -47,7 +46,7 @@ internal class DexStreams(private val source: MethodSource, private val vm: () -
     private fun extendsHost(type: String, host: Class<*>): Boolean {
         var cur: String? = type
         while (cur != null) {
-            val info = source.classInfo(cur) ?: return runCatching { host.isAssignableFrom(hostClass(cur)) }.getOrDefault(false)
+            val info = source.classInfo(cur) ?: return runCatching { host.isAssignableFrom(HostClasses.of(cur)) }.getOrDefault(false)
             cur = info.superType
         }
         return false

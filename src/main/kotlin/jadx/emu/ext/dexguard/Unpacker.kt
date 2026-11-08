@@ -2,14 +2,14 @@ package jadx.emu.ext.dexguard
 
 import jadx.plugins.emu.api.EmuExtensionContext
 import jadx.plugins.emu.exec.ExecLimits
-import jadx.plugins.emu.exec.HookRegistry
-import jadx.plugins.emu.exec.input.DexInputSource
+import jadx.plugins.emu.api.EmuTarget
+import jadx.plugins.emu.exec.MethodSource
 import jadx.plugins.emu.exec.model.DexMethod
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 
-internal class Unpacker(private val ctx: EmuExtensionContext, private val hooks: HookRegistry) {
+internal class Unpacker(private val ctx: EmuExtensionContext) {
 
     val limits = ExecLimits(maxSteps = 50_000_000, maxMillis = 120_000, maxDepth = 64)
 
@@ -17,12 +17,12 @@ internal class Unpacker(private val ctx: EmuExtensionContext, private val hooks:
     private val dumped = ArrayList<Path>()
 
     fun registerActions() {
-        ctx.addCodeAction("DexGuard: unpack from this class", enabled = { !it.isMethod }) { target ->
+        ctx.addCodeAction("DexGuard: unpack from this class", { !it.isMethod }, null) { target ->
             Thread({ unpackFrom(target.rawClassName) }, "dexguard-unpacker").apply { isDaemon = true }.start()
         }
     }
 
-    fun onLoad(bytes: ByteArray, src: DexInputSource) {
+    fun onLoad(bytes: ByteArray, src: MethodSource) {
         val name = "hidden-" + sha256(bytes).substring(0, 12) + ".dex"
         val path = outDir.resolve(name)
         if (!Files.exists(path)) Files.write(path, bytes)
@@ -31,8 +31,7 @@ internal class Unpacker(private val ctx: EmuExtensionContext, private val hooks:
     }
 
     private fun unpackFrom(rawClassName: String) {
-        val desc = ctx.emu.descriptorOf(rawClassName)
-        val clinit = ctx.emu.source.method(desc, "<clinit>()V")
+        val clinit = ctx.emu.method(EmuTarget(rawClassName, "<clinit>()V"))
         if (clinit == null) {
             ctx.log.warn("{} has no static initializer", rawClassName)
             return
@@ -45,7 +44,7 @@ internal class Unpacker(private val ctx: EmuExtensionContext, private val hooks:
     }
 
     private fun run(clinit: DexMethod) {
-        val vm = ctx.emu.engine.newVm(limits, hooks = hooks, androidEnvUnknown = false)
+        val vm = ctx.emu.newVm(limits)
         runCatching { vm.invoke(clinit) }.onFailure { ctx.log.warn("{}: initializer failed: {}", clinit.declClass, it.toString()) }
     }
 

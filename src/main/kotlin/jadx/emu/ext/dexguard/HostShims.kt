@@ -1,83 +1,80 @@
 package jadx.emu.ext.dexguard
 
-import jadx.plugins.emu.exec.AndroidStubs
+import jadx.plugins.emu.api.Hooks
 import jadx.plugins.emu.exec.DvmClass
 import jadx.plugins.emu.exec.DvmField
 import jadx.plugins.emu.exec.DvmMethodHandle
-import jadx.plugins.emu.exec.HookRegistry
-import jadx.plugins.emu.exec.NotHandled
 import jadx.plugins.emu.exec.runtime.DvmObject
+import jadx.plugins.emu.exec.runtime.isUnknown
 import java.io.ByteArrayInputStream
 
 internal class HostShims(private val app: AppInfo) {
-
-    fun register(stubs: AndroidStubs, hooks: HookRegistry) {
-        registerFrameworkMembers(stubs, hooks)
-        registerArchiveAccess(stubs, hooks)
-        stubs.registerMethod("Ljava/lang/System;", "identityHashCode") { _, a -> System.identityHashCode(a.getOrNull(0)) }
-        hooks.add("Ljava/lang/System;->getProperty(Ljava/lang/String;)Ljava/lang/String;") { call ->
-            SYSTEM_PROPERTIES[call.args.getOrNull(0)]?.let { call.replace(it.replace("{pkg}", app.packageName ?: "app")) }
+    fun register(hooks: Hooks) {
+        registerFrameworkMembers(hooks)
+        registerArchiveAccess(hooks)
+        hooks.stub("Ljava/lang/System;->identityHashCode") { replace(System.identityHashCode(args.getOrNull(0))) }
+        hooks.hook("Ljava/lang/System;->getProperty(Ljava/lang/String;)Ljava/lang/String;") {
+            SYSTEM_PROPERTIES[args.getOrNull(0)]?.let { replace(it.replace("{pkg}", app.packageName ?: "app")) }
         }
     }
 
-    private fun registerFrameworkMembers(stubs: AndroidStubs, hooks: HookRegistry) {
+    private fun registerFrameworkMembers(hooks: Hooks) {
         for (getter in FIELD_GETTERS) {
-            hooks.add("Ljava/lang/reflect/Field;->$getter") { call ->
-                val f = call.receiver as? DvmField ?: return@add
-                if (!stubs.isFrameworkClass(f.ref.declClass)) return@add
-                val v = stubs.field(f.ref.declClass, f.ref.name)
-                if (v !== NotHandled) call.replace(v)
+            hooks.hook("Ljava/lang/reflect/Field;->$getter") {
+                val f = receiver as? DvmField ?: return@hook
+                if (!hooks.isFrameworkClass(f.ref.declClass)) return@hook
+                val v = vm.getStatic("${f.ref.declClass}->${f.ref.name}")
+                if (!v.isUnknown()) replace(v)
             }
         }
-        hooks.add(METHOD_INVOKE) { call ->
-            val h = call.receiver as? DvmMethodHandle ?: return@add
-            val target = call.args.getOrNull(0)?.takeUnless { it == 0 }
-            val args = argList(call.args.getOrNull(1))
-            if (h.hostMethod != null) return@add
-            val symbol = h.symbol ?: return@add
-            if (!stubs.isFrameworkClass(symbol.declClass)) return@add
-            val r = runCatching { if (target == null) stubs.callStatic(symbol, args) else stubs.callInstance(symbol, target, args) }.getOrNull()
-            if (r != null && r !== NotHandled) call.replace(r)
+        hooks.hook(METHOD_INVOKE) {
+            val h = receiver as? DvmMethodHandle ?: return@hook
+            val target = args.getOrNull(0)?.takeUnless { it == 0 }
+            val callArgs = argList(args.getOrNull(1))
+            if (h.hostMethod != null) return@hook
+            val symbol = h.symbol ?: return@hook
+            if (!hooks.isFrameworkClass(symbol.declClass)) return@hook
+            if (target == null) return@hook
+            val r = runCatching { vm.invoke(target, symbol.shortId, callArgs) }.getOrNull()
+            if (r != null && !r.isUnknown()) replace(r)
         }
     }
 
-    private fun registerArchiveAccess(stubs: AndroidStubs, hooks: HookRegistry) {
-        hooks.add(METHOD_INVOKE) { call ->
-            val m = (call.receiver as? DvmMethodHandle)?.hostMethod ?: return@add
-            if (m.declaringClass != Class::class.java || call.args.getOrNull(0) !is DvmClass) return@add
-            val name = argList(call.args.getOrNull(1)).getOrNull(0)?.toString() ?: return@add
+    private fun registerArchiveAccess(hooks: Hooks) {
+        hooks.hook(METHOD_INVOKE) {
+            val m = (receiver as? DvmMethodHandle)?.hostMethod ?: return@hook
+            if (m.declaringClass != Class::class.java || args.getOrNull(0) !is DvmClass) return@hook
+            val name = argList(args.getOrNull(1)).getOrNull(0)?.toString() ?: return@hook
             when (m.name) {
-                "getResource" -> call.replace(app.resourceUrl(name))
-                "getResourceAsStream" -> call.replace(app.resourceBytes(name)?.let { ByteArrayInputStream(it) })
+                "getResource" -> replace(app.resourceUrl(name))
+                "getResourceAsStream" -> replace(app.resourceBytes(name)?.let { ByteArrayInputStream(it) })
             }
         }
         for (ctor in listOf("(Ljava/lang/String;)V", "(Ljava/io/File;)V", "(Ljava/io/File;I)V", "(Ljava/lang/String;Ljava/nio/charset/Charset;)V")) {
-            hooks.add("Ljava/util/zip/ZipFile;-><init>$ctor") { call -> call.replace(null) }
+            hooks.hook("Ljava/util/zip/ZipFile;-><init>$ctor") { replace(null) }
         }
-        hooks.add("Ljava/util/zip/ZipFile;->getEntry(Ljava/lang/String;)Ljava/util/zip/ZipEntry;") { call ->
-            val name = call.args.getOrNull(0) as? String ?: return@add
-            val bytes = app.resourceBytes(name) ?: return@add call.replace(null)
-            call.replace(DvmObject(ZIP_ENTRY).apply { fields[ZIP_ENTRY_NAME] = name; fields[ZIP_ENTRY_SIZE] = bytes.size.toLong() })
+        hooks.hook("Ljava/util/zip/ZipFile;->getEntry(Ljava/lang/String;)Ljava/util/zip/ZipEntry;") {
+            val name = args.getOrNull(0) as? String ?: return@hook
+            val bytes = app.resourceBytes(name) ?: return@hook replace(null)
+            replace(DvmObject(ZIP_ENTRY).apply { fields[ZIP_ENTRY_NAME] = name; fields[ZIP_ENTRY_SIZE] = bytes.size.toLong() })
         }
-        hooks.add("Ljava/util/zip/ZipFile;->getInputStream(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;") { call ->
-            val entry = call.args.getOrNull(0) as? DvmObject ?: return@add
-            val name = entry.fields[ZIP_ENTRY_NAME] as? String ?: return@add
-            app.resourceBytes(name)?.let { call.replace(ByteArrayInputStream(it)) }
+        hooks.hook("Ljava/util/zip/ZipFile;->getInputStream(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;") {
+            val entry = args.getOrNull(0) as? DvmObject ?: return@hook
+            val name = entry.fields[ZIP_ENTRY_NAME] as? String ?: return@hook
+            app.resourceBytes(name)?.let { replace(ByteArrayInputStream(it)) }
         }
-        hooks.add("Ljava/util/zip/ZipFile;->close()V") { call -> call.replace(null) }
-        stubs.registerMethod(ZIP_ENTRY, "getName") { r, _ -> (r as? DvmObject)?.fields?.get(ZIP_ENTRY_NAME) ?: NotHandled }
-        stubs.registerMethod(ZIP_ENTRY, "getSize") { r, _ -> (r as? DvmObject)?.fields?.get(ZIP_ENTRY_SIZE) ?: NotHandled }
+        hooks.hook("Ljava/util/zip/ZipFile;->close()V") { replace(null) }
+        hooks.stub("$ZIP_ENTRY->getName") { (receiver as? DvmObject)?.fields?.get(ZIP_ENTRY_NAME)?.let { replace(it) } }
+        hooks.stub("$ZIP_ENTRY->getSize") { (receiver as? DvmObject)?.fields?.get(ZIP_ENTRY_SIZE)?.let { replace(it) } }
     }
 
     private fun argList(v: Any?): List<Any?> = (v as? Array<*>)?.toList() ?: emptyList()
 
     companion object {
         const val METHOD_INVOKE = "Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"
-
         private const val ZIP_ENTRY = "Ljava/util/zip/ZipEntry;"
         private const val ZIP_ENTRY_NAME = "$ZIP_ENTRY.name"
         private const val ZIP_ENTRY_SIZE = "$ZIP_ENTRY.size"
-
         private val FIELD_GETTERS = listOf(
             "get(Ljava/lang/Object;)Ljava/lang/Object;", "getInt(Ljava/lang/Object;)I", "getLong(Ljava/lang/Object;)J",
             "getBoolean(Ljava/lang/Object;)Z", "getShort(Ljava/lang/Object;)S", "getByte(Ljava/lang/Object;)B",

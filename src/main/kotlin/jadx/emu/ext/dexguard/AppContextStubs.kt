@@ -1,8 +1,7 @@
 package jadx.emu.ext.dexguard
 
-import jadx.plugins.emu.exec.AndroidStubs
+import jadx.plugins.emu.api.Hooks
 import jadx.plugins.emu.exec.DvmMethodHandle
-import jadx.plugins.emu.exec.HookRegistry
 import jadx.plugins.emu.exec.runtime.DvmObject
 import jadx.plugins.emu.exec.runtime.UNKNOWN
 
@@ -19,22 +18,22 @@ internal class AppContextStubs(private val app: AppInfo) {
         }
     }
 
-    fun register(stubs: AndroidStubs, hooks: HookRegistry) {
-        hooks.add(HostShims.METHOD_INVOKE) { call ->
-            val symbol = (call.receiver as? DvmMethodHandle)?.symbol ?: return@add
-            if (symbol.name in APP_GETTERS[symbol.declClass].orEmpty()) call.replace(context)
+    fun register(hooks: Hooks) {
+        hooks.hook(HostShims.METHOD_INVOKE) {
+            val symbol = (receiver as? DvmMethodHandle)?.symbol ?: return@hook
+            if (symbol.name in APP_GETTERS[symbol.declClass].orEmpty()) replace(context)
         }
         for (cls in CONTEXT_CLASSES) {
-            stubs.registerMethod(cls, "getApplicationContext") { _, _ -> context }
-            stubs.registerMethod(cls, "getBaseContext") { _, _ -> context }
-            stubs.registerMethod(cls, "getResources") { _, _ -> resources }
-            stubs.registerMethod(cls, "getPackageName") { _, _ -> app.packageName ?: UNKNOWN }
-            stubs.registerMethod(cls, "getApplicationInfo") { _, _ -> appInfo }
-            stubs.registerMethod(cls, "getString") { _, a -> resourceString(a) }
-            stubs.registerMethod(cls, "getText") { _, a -> resourceString(a) }
+            hooks.stub("$cls->getApplicationContext", context)
+            hooks.stub("$cls->getBaseContext", context)
+            hooks.stub("$cls->getResources", resources)
+            hooks.stub("$cls->getPackageName") { replace(app.packageName ?: UNKNOWN) }
+            hooks.stub("$cls->getApplicationInfo") { replace(appInfo) }
+            hooks.stub("$cls->getString") { replace(resourceString(args)) }
+            hooks.stub("$cls->getText") { replace(resourceString(args)) }
         }
-        stubs.registerMethod("Landroid/content/res/Resources;", "getString") { _, a -> resourceString(a) }
-        stubs.registerMethod("Landroid/content/res/Resources;", "getText") { _, a -> resourceString(a) }
+        hooks.stub("Landroid/content/res/Resources;->getString") { replace(resourceString(args)) }
+        hooks.stub("Landroid/content/res/Resources;->getText") { replace(resourceString(args)) }
     }
 
     private fun resourceString(a: List<Any?>): Any? {
